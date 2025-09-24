@@ -2,6 +2,7 @@ import tifffile
 from PIL import Image
 import pydicom
 import numpy as np
+import nibabel as nib
 
 TILE_SIZE = 1024
 
@@ -199,5 +200,127 @@ class DicomImageWrapper:
         if as_array:
             return np.array(region)
         return region
+
+class NiftiImageWrapper:
+    """Wrapper for NIfTI image files to mimic WSI interface"""
+
+    def __init__(self, nifti_path):
+        self.path = nifti_path
+        self._nifti = nib.load(nifti_path)
+        self._data = self._nifti.get_fdata()
+        self.header = self._nifti.header
+        self.zooms = self.header.get_zooms()
+        
+        # Calculate global min and max values for the entire dataset
+        self._global_min = self._data.min()
+        self._global_max = self._data.max()
+        print(f"NiftiImageWrapper: Global min={self._global_min}, Global max={self._global_max}")
+        
+        self._init_levels()
+        self._init_properties()
+
+    def _init_levels(self):
+        """Initialize image pyramid levels"""
+        # Get dimensions from NIfTI data
+        # NIfTI data typically has (x, y, z, t) or (x, y, z) format
+        shape = self._data.shape
+        if len(shape) >= 2:
+            # For 3D data, use the middle slice of z dimension
+            if len(shape) >= 3:
+                z_mid = shape[2] // 2
+                original_height, original_width = shape[0], shape[1]
+                print(f"NiftiImageWrapper: 3D data, using middle slice z={z_mid}, shape={original_height}x{original_width}")
+            else:
+                original_height, original_width = shape
+                print(f"NiftiImageWrapper: 2D data, shape={original_height}x{original_width}")
+            
+            self.dimensions = (original_width, original_height)
+            
+            # Create pyramid levels
+            self.level_dimensions = [(original_width, original_height)]
+            
+            # Add additional downsampled levels
+            width, height = original_width, original_height
+            factor = 2
+            while width // factor >= 64 and height // factor >= 64:
+                level_width = width // factor
+                level_height = height // factor
+                self.level_dimensions.append((level_width, level_height))
+                factor *= 2
+            
+            self.level_count = len(self.level_dimensions)
+            print(f"NiftiImageWrapper: Created {self.level_count} pyramid levels")
+        else:
+            # Fallback for unusual shapes
+            self.dimensions = (100, 100)
+            self.level_dimensions = [(100, 100)]
+            self.level_count = 1
+            print(f"NiftiImageWrapper: Abnormal data shape, using default size 100x100")
+
+    def _init_properties(self):
+        """Initialize image properties"""
+        self.properties = {
+            'vendor': 'NiftiImageWrapper',
+            'level_count': str(self.level_count),
+            'dimensions': f'{self.dimensions[0]}x{self.dimensions[1]}',
+            'format': 'NIfTI',
+            'shape': str(self._data.shape),
+            'header': str(self.header),
+            'global_min': str(self._global_min),
+            'global_max': str(self._global_max)
+        }
+
+    def read_region(self, location, level, size, as_array=False):
+        """Read image region from specified level"""
+        # Calculate scale factor for requested level
+        if level >= len(self.level_dimensions):
+            level = len(self.level_dimensions) - 1
+            
+        scale_factor = self.dimensions[0] / self.level_dimensions[level][0]
+        
+        # Calculate region in original image
+        x, y = location
+        scaled_x = int(x / scale_factor)
+        scaled_y = int(y / scale_factor)
+        scaled_width = int(size[0])
+        scaled_height = int(size[1])
+        
+        # Extract region from NIfTI data
+        # For 3D data, use the middle slice of z dimension
+        if len(self._data.shape) >= 3:
+            z_mid = self._data.shape[2] // 2
+            slice_data = self._data[:, :, z_mid]
+        else:
+            slice_data = self._data
+            
+        # Ensure boundaries are not exceeded
+        max_y = min(scaled_y + scaled_height, slice_data.shape[0])
+        max_x = min(scaled_x + scaled_width, slice_data.shape[1])
+        
+        # Extract region
+        region_data = slice_data[scaled_y:max_y, scaled_x:max_x]
+        
+        # Use global min and max values for normalization to ensure color consistency
+        if self._global_max > self._global_min:
+            normalized = ((region_data - self._global_min) / 
+                         (self._global_max - self._global_min) * 255).astype(np.uint8)
+        else:
+            normalized = np.zeros(region_data.shape, dtype=np.uint8)
+        
+        # Convert to PIL image
+        if len(normalized.shape) == 2:  # Grayscale image
+            img = Image.fromarray(normalized, 'L')
+            img = img.convert('RGB')  # Convert to RGB for consistency
+        else:  # Already RGB
+            img = Image.fromarray(normalized)
+        
+        # Resize to requested size if needed
+        current_width, current_height = img.size
+        if current_width != scaled_width or current_height != scaled_height:
+            img = img.resize((scaled_width, scaled_height), Image.Resampling.LANCZOS)
+        
+        if as_array:
+            return np.array(img)
+        return img
 
 
