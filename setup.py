@@ -8,7 +8,7 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
 
 setup(
     name="tissuelab-sdk",
-    version="0.1.2",
+    version="0.1.3",
     author="TissueLab Team",
     description="TissueLab Python SDK - OS-aware imaging wrappers",
     long_description=long_description,
