@@ -324,3 +324,105 @@ class NiftiImageWrapper:
         return img
 
 
+class TiffFileWrapper:
+
+    def __init__(self, tiff_path):
+        self.path = tiff_path
+        self._tiff = tifffile.TiffFile(tiff_path)
+        self._init_levels()
+        self._init_properties()
+
+    def _init_levels(self):
+        """init levels, use tiff page as level"""
+        # get all page dimensions
+        self.level_dimensions = []
+        for page in self._tiff.pages:
+            # TIFF shape is (height, width, channels), we only need (width, height)
+            if len(page.shape) == 3:
+                height, width, _ = page.shape
+            else:
+                height, width = page.shape
+            self.level_dimensions.append((width, height))
+
+        # first level dimensions as main dimensions
+        self.dimensions = self.level_dimensions[0]
+        self.level_count = len(self.level_dimensions)
+
+    def _init_properties(self):
+        """init properties, extract useful metadata from TIFF tags"""
+        self.properties = {}
+        self.fit_page = 3
+
+        # get basic properties from first page
+        first_page = self._tiff.pages[0]
+        tags = first_page.tags
+
+        # add basic properties
+        self.properties.update({
+            'vendor':
+            'tifffile',
+            'level_count':
+            str(self.level_count),
+            'dimensions':
+            f'{self.dimensions[0]}x{self.dimensions[1]}',
+            'dtype':
+            str(first_page.dtype),
+            'channels':
+            str(first_page.shape[2] if len(first_page.shape) == 3 else 1),
+        })
+
+        # add useful TIFF tags
+        tag_mapping = {
+            'ImageWidth': 'width',
+            'ImageLength': 'height',
+            'BitsPerSample': 'bits_per_sample',
+            'Compression': 'compression',
+            'PhotometricInterpretation': 'photometric',
+            'SamplesPerPixel': 'samples_per_pixel',
+            'Software': 'software',
+            'DateTime': 'datetime',
+            'Artist': 'artist',
+            'HostComputer': 'host_computer',
+        }
+
+        for tag_name, prop_name in tag_mapping.items():
+            if tag_name in tags:
+                tag_value = tags[tag_name].value
+                self.properties[prop_name] = str(tag_value)
+
+        # add dimensions for each level
+        for i, dims in enumerate(self.level_dimensions):
+            if dims[0] > TILE_SIZE and dims[
+                    1] > TILE_SIZE and i > self.fit_page:
+                self.fit_page = i
+            self.properties[f'level_{i}_dimensions'] = f'{dims[0]}x{dims[1]}'
+
+    def get_thumbnail(self, size):
+        """return thumbnail, use the smallest page"""
+        img = self._tiff.pages[-1].asarray()  # use the smallest page
+        pil_img = Image.fromarray(img)
+        return pil_img.thumbnail(size, Image.Resampling.LANCZOS)
+
+    def read_region(self, location, level, size, as_array=False):
+        """read region from specified level
+        
+        Args:
+            location: (x, y) start position (based on level 0 coordinates)
+            level: level
+            size: (width, height) size to read
+        """
+        if level >= self.level_count:
+            raise ValueError(
+                f"Invalid level {level}. Max level is {self.level_count-1}")
+
+        # calculate actual coordinates in current level
+        scale_factor = self.dimensions[0] / self.level_dimensions[level][0]
+        x, y = location
+        scaled_x = int(x / scale_factor)
+        scaled_y = int(y / scale_factor)
+
+        # read region from corresponding page
+        img = self._tiff.pages[level].asarray()
+        region = img[scaled_y:scaled_y + size[1], scaled_x:scaled_x + size[0]]
+
+        return Image.fromarray(region)
