@@ -13,7 +13,7 @@ setup(
     description="TissueLab Python SDK - OS-aware imaging wrappers",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/tissuelab/tissuelab-sdk",
+    url="https://github.com/zhihuanglab/TissueLab-SDK.git",
     packages=find_packages(),
     classifiers=[
         "Development Status :: 3 - Alpha",
