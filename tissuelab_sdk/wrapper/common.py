@@ -55,11 +55,15 @@ class TiffFileWrapper:
         self._init_levels()
         self._init_properties()
 
+    def close(self):
+        """Explicitly close the TIFF file."""
+        if hasattr(self, '_tiff') and self._tiff is not None:
+            self._tiff.close()
+            self._tiff = None
+
     def __del__(self):
         try:
-            if hasattr(self, '_tiff') and self._tiff is not None:
-                self._tiff.close()
-                self._tiff = None
+            self.close()
         except Exception:
             # Suppress errors during cleanup
             pass
@@ -172,11 +176,15 @@ class SimpleImageWrapper:
         self._init_properties()
         self._lock = threading.Lock()
     
+    def close(self):
+        """Explicitly close the image."""
+        if hasattr(self, '_image') and self._image is not None:
+            self._image.close()
+            self._image = None
+    
     def __del__(self):
         try:
-            if hasattr(self, '_image') and self._image is not None:
-                self._image.close()
-                self._image = None
+            self.close()
         except Exception:
             # Suppress errors during cleanup
             pass
@@ -239,12 +247,16 @@ class DicomImageWrapper:
         self._init_levels()
         self._init_properties()
 
+    def close(self):
+        """Explicitly close the DICOM image."""
+        if hasattr(self, '_ds') and self._ds is not None:
+            self._ds = None
+        if hasattr(self, '_image') and self._image is not None:
+            self._image = None
+
     def __del__(self):
         try:
-            if hasattr(self, '_ds') and self._ds is not None:
-                self._ds = None
-            if hasattr(self, '_image') and self._image is not None:
-                self._image = None
+            self.close()
         except Exception:
             # Suppress errors during cleanup
             pass
@@ -307,10 +319,14 @@ class NiftiImageWrapper:
         self._init_levels()
         self._init_properties()
     
+    def close(self):
+        """Explicitly close the NIfTI image."""
+        if hasattr(self, '_nifti') and self._nifti is not None:
+            self._nifti = None
+    
     def __del__(self):
         try:
-            if hasattr(self, '_nifti') and self._nifti is not None:
-                self._nifti = None
+            self.close()
         except Exception:
             # Suppress errors during cleanup
             pass
