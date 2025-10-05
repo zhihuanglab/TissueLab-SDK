@@ -6,9 +6,6 @@ import numpy as np
 import sys
 import threading
 import nibabel as nib
-from isyntax import ISyntax
-# Add czifile import for thumbnail reading
-import czifile
 import io
 TILE_SIZE = 1024
 
