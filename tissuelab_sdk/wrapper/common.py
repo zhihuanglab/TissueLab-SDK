@@ -6,7 +6,6 @@ import numpy as np
 import sys
 import threading
 import nibabel as nib
-# Add czifile import for thumbnail reading
 import io
 import logging
 
