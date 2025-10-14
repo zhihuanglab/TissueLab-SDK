@@ -242,7 +242,7 @@ class TiffFileWrapper:
                 except Exception as e:
                     # Other errors - also raise clear error for z-stack
                     raise RuntimeError(
-                        f"读取 z-stack 第 {z_layer} 层时出错: {str(e)}"
+                        f"Error reading layer {z_layer} of z-stack: {str(e)}"
                     ) from e
             else:
                 # Not a z-stack, use page-based reading
