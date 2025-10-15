@@ -7,6 +7,11 @@ import sys
 import threading
 import nibabel as nib
 import io
+import logging
+
+# Create logger for wrappers
+logger = logging.getLogger(__name__)
+
 TILE_SIZE = 1024
 
 class TiffSlideWrapper:
@@ -69,13 +74,49 @@ class TiffFileWrapper:
         """init levels, use tiff page as level"""
         # get all page dimensions
         self.level_dimensions = []
-        for page in self._tiff.pages:
-            # TIFF shape is (height, width, channels), we only need (width, height)
-            if len(page.shape) == 3:
-                height, width, _ = page.shape
-            else:
-                height, width = page.shape
-            self.level_dimensions.append((width, height))
+        
+        # Try using series if available (better for z-stack and complex TIFF files)
+        if hasattr(self._tiff, 'series') and len(self._tiff.series) > 0:
+            # Use the first main series
+            main_series = self._tiff.series[0]
+            
+            # For z-stack files, we want to use the first z-layer as the base
+            # series.shape might be (z, height, width, channels) or (height, width, channels)
+            if hasattr(main_series, 'shape'):
+                shape = main_series.shape
+                
+                # Handle different series dimensions
+                if len(shape) == 4:  # (z, height, width, channels) - z-stack
+                    # Use first z-layer dimensions
+                    _, height, width, _ = shape
+                    self.level_dimensions.append((width, height))
+                elif len(shape) == 3:  # (height, width, channels) - normal
+                    height, width, _ = shape
+                    self.level_dimensions.append((width, height))
+                elif len(shape) == 2:  # (height, width) - grayscale
+                    height, width = shape
+                    self.level_dimensions.append((width, height))
+            
+            # Add additional pyramid levels from other series
+            for series_idx, series in enumerate(self._tiff.series[1:], 1):
+                if hasattr(series, 'shape'):
+                    shape = series.shape
+                    if len(shape) >= 2:
+                        # Take last two dimensions as height, width
+                        height, width = shape[-3:-1] if len(shape) >= 3 else shape[-2:]
+                        self.level_dimensions.append((width, height))
+        
+        # Fallback to page-based if series didn't work or is empty
+        if not self.level_dimensions:
+            for page in self._tiff.pages:
+                # TIFF shape is (height, width, channels), we only need (width, height)
+                if len(page.shape) == 3:
+                    height, width, _ = page.shape
+                elif len(page.shape) == 2:
+                    height, width = page.shape
+                else:
+                    continue
+                self.level_dimensions.append((width, height))
 
         # first level dimensions as main dimensions
         self.dimensions = self.level_dimensions[0]
@@ -136,17 +177,23 @@ class TiffFileWrapper:
         pil_img = Image.fromarray(img)
         return pil_img.thumbnail(size, Image.Resampling.LANCZOS)
 
-    def read_region(self, location, level, size, as_array=False):
+    def read_region(self, location, level, size, as_array=False, z_layer=None):
         """read region from specified level
 
         Args:
             location: (x, y) start position (based on level 0 coordinates)
             level: level
             size: (width, height) size to read
+            as_array: if True, return numpy array instead of PIL Image
+            z_layer: z-layer index (for z-stack files), defaults to 0
         """
         if level >= self.level_count:
             raise ValueError(
                 f"Invalid level {level}. Max level is {self.level_count-1}")
+
+        # Default z_layer to 0 if not specified
+        if z_layer is None:
+            z_layer = 0
 
         # calculate actual coordinates in current level
         scale_factor = self.dimensions[0] / self.level_dimensions[level][0]
@@ -155,8 +202,56 @@ class TiffFileWrapper:
         scaled_y = int(y / scale_factor)
 
         # read region from corresponding page
-        img = self._tiff.pages[level].asarray()
-        region = img[scaled_y:scaled_y + size[1], scaled_x:scaled_x + size[0]]
+        # Check if this is a z-stack file using series
+        if hasattr(self._tiff, 'series') and len(self._tiff.series) > 0:
+            main_series = self._tiff.series[0]
+            if hasattr(main_series, 'shape') and len(main_series.shape) == 4:
+                # This is a z-stack file (z, height, width, channels)
+                try:
+                    # Use series to read with z-layer
+                    # Get the series data with zarr-like access
+                    img_full = main_series.asarray()  # Shape: (z, height, width, channels)
+                    
+                    # Ensure z_layer is within bounds
+                    z_count = img_full.shape[0]
+                    if z_layer >= z_count:
+                        z_layer = 0
+                    
+                    # Extract the specific z-layer
+                    img = img_full[z_layer]  # Shape: (height, width, channels)
+                    
+                    # Apply downsampling if level > 0
+                    if level > 0:
+                        downsample_factor = 2 ** level
+                        from skimage.transform import downscale_local_mean
+                        # Downsample spatial dimensions only
+                        img = downscale_local_mean(img, (downsample_factor, downsample_factor, 1))
+                        img = img.astype(np.uint8)
+                    
+                    # Extract region
+                    region = img[scaled_y:scaled_y + size[1], scaled_x:scaled_x + size[0]]
+                    
+                except MemoryError as e:
+                    # Memory error - don't fallback, raise clear error
+                    raise MemoryError(
+                        f"Insufficient memory to load z-stack file."
+                        f"File dimensions: {main_series.shape}, "
+                        f"requires approximately {np.prod(main_series.shape) / 1024**3:.1f} GB of memory."
+                        f"Please use a smaller file or increase system memory."
+                    ) from e
+                except Exception as e:
+                    # Other errors - also raise clear error for z-stack
+                    raise RuntimeError(
+                        f"Error reading layer {z_layer} of z-stack: {str(e)}"
+                    ) from e
+            else:
+                # Not a z-stack, use page-based reading
+                img = self._tiff.pages[level].asarray()
+                region = img[scaled_y:scaled_y + size[1], scaled_x:scaled_x + size[0]]
+        else:
+            # Fallback to page-based reading
+            img = self._tiff.pages[level].asarray()
+            region = img[scaled_y:scaled_y + size[1], scaled_x:scaled_x + size[0]]
 
         if as_array:
             return region
