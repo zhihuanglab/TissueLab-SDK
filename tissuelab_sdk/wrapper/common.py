@@ -54,6 +54,7 @@ class TiffFileWrapper:
     def __init__(self, tiff_path):
         self.path = tiff_path
         self._tiff = tifffile.TiffFile(tiff_path)
+        self._zarr_arrays = {}  # Cache for zarr arrays (non-zstack files)
         self._init_levels()
         self._init_properties()
 
@@ -70,15 +71,48 @@ class TiffFileWrapper:
             # Suppress errors during cleanup
             pass
 
+    def _pick_largest_series(self):
+        """Select the series with the largest resolution (most pixels)"""
+        if not hasattr(self._tiff, 'series') or len(self._tiff.series) == 0:
+            return None
+        
+        best_series = self._tiff.series[0]
+        best_pixels = 0
+        
+        for series in self._tiff.series:
+            if not hasattr(series, 'shape') or not hasattr(series, 'axes'):
+                continue
+            
+            axes = series.axes
+            shape = series.shape
+            
+            # Extract Y and X dimensions
+            y_size = shape[axes.index('Y')] if 'Y' in axes else 0
+            x_size = shape[axes.index('X')] if 'X' in axes else 0
+            pixels = y_size * x_size
+            
+            if pixels > best_pixels:
+                best_pixels = pixels
+                best_series = series
+        
+        return best_series
+
     def _init_levels(self):
         """init levels, use tiff page as level"""
         # get all page dimensions
         self.level_dimensions = []
+        self._is_zstack = False
+        self._z_layer_count = 1
         
         # Try using series if available (better for z-stack and complex TIFF files)
         if hasattr(self._tiff, 'series') and len(self._tiff.series) > 0:
-            # Use the first main series
-            main_series = self._tiff.series[0]
+            # Select the series with largest resolution (most important for NDPI)
+            main_series = self._pick_largest_series()
+            if main_series is None:
+                main_series = self._tiff.series[0]
+            
+            # Store main series for later use in read_region
+            self._main_series = main_series
             
             # For z-stack files, we want to use the first z-layer as the base
             # series.shape might be (z, height, width, channels) or (height, width, channels)
@@ -88,8 +122,51 @@ class TiffFileWrapper:
                 # Handle different series dimensions
                 if len(shape) == 4:  # (z, height, width, channels) - z-stack
                     # Use first z-layer dimensions
-                    _, height, width, _ = shape
-                    self.level_dimensions.append((width, height))
+                    self._is_zstack = True
+                    self._z_layer_count = shape[0]
+                    
+                    # Method 1: Try using series.levels (most reliable for NDPI)
+                    if hasattr(main_series, 'levels') and len(main_series.levels) > 0:
+                        for level_idx, level_series in enumerate(main_series.levels):
+                            if hasattr(level_series, 'shape') and hasattr(level_series, 'axes'):
+                                level_shape = level_series.shape
+                                level_axes = level_series.axes
+                                
+                                # Extract X and Y dimensions from this level
+                                if 'Y' in level_axes and 'X' in level_axes:
+                                    y_idx = level_axes.index('Y')
+                                    x_idx = level_axes.index('X')
+                                    height = level_shape[y_idx]
+                                    width = level_shape[x_idx]
+                                    self.level_dimensions.append((width, height))
+                        
+                    # Method 2: Fallback to page-based detection if series.levels not available
+                    if not self.level_dimensions:
+                        # Extract pyramid levels from first z-layer by detecting dimension pattern
+                        total_pages = len(self._tiff.pages)
+                        first_page_dims = None
+                        for idx in range(total_pages):
+                            try:
+                                page = self._tiff.pages[idx]
+                                if len(page.shape) == 3:
+                                    h, w, _ = page.shape
+                                elif len(page.shape) == 2:
+                                    h, w = page.shape
+                                else:
+                                    continue
+                                
+                                # Check if we've reached the next z-layer (dimensions repeat)
+                                if first_page_dims is None:
+                                    first_page_dims = (w, h)
+                                elif (w, h) == first_page_dims and len(self.level_dimensions) > 0:
+                                    # We've looped back to the same dimensions, this is the start of z-layer 1
+                                    break
+                                
+                                self.level_dimensions.append((w, h))
+                            except Exception as e:
+                                logger.warning(f"[TiffFileWrapper] Could not read page {idx}: {e}")
+                                break
+                    
                 elif len(shape) == 3:  # (height, width, channels) - normal
                     height, width, _ = shape
                     self.level_dimensions.append((width, height))
@@ -97,14 +174,15 @@ class TiffFileWrapper:
                     height, width = shape
                     self.level_dimensions.append((width, height))
             
-            # Add additional pyramid levels from other series
-            for series_idx, series in enumerate(self._tiff.series[1:], 1):
-                if hasattr(series, 'shape'):
-                    shape = series.shape
-                    if len(shape) >= 2:
-                        # Take last two dimensions as height, width
-                        height, width = shape[-3:-1] if len(shape) >= 3 else shape[-2:]
-                        self.level_dimensions.append((width, height))
+            # Add additional pyramid levels from other series (for non-zstack)
+            if not self._is_zstack:
+                for series_idx, series in enumerate(self._tiff.series[1:], 1):
+                    if hasattr(series, 'shape'):
+                        shape = series.shape
+                        if len(shape) >= 2:
+                            # Take last two dimensions as height, width
+                            height, width = shape[-3:-1] if len(shape) >= 3 else shape[-2:]
+                            self.level_dimensions.append((width, height))
         
         # Fallback to page-based if series didn't work or is empty
         if not self.level_dimensions:
@@ -117,10 +195,31 @@ class TiffFileWrapper:
                 else:
                     continue
                 self.level_dimensions.append((width, height))
+        
+        # Ensure _main_series is always set
+        if not hasattr(self, '_main_series'):
+            if hasattr(self._tiff, 'series') and len(self._tiff.series) > 0:
+                self._main_series = self._tiff.series[0]
+            else:
+                self._main_series = None
 
         # first level dimensions as main dimensions
         self.dimensions = self.level_dimensions[0]
         self.level_count = len(self.level_dimensions)
+        
+        # Calculate level_downsamples (REQUIRED by frontend for coordinate mapping)
+        # downsample = how many base-level pixels per level pixel
+        self.level_downsamples = []
+        base_width, base_height = self.level_dimensions[0]
+        for level_width, level_height in self.level_dimensions:
+            # Use width for downsample calculation (should be same as height ratio)
+            downsample = base_width / level_width
+            self.level_downsamples.append(downsample)
+        
+        # Expose z-stack info as public properties (REQUIRED by frontend)
+        self.is_zstack = self._is_zstack
+        self.z_layer_count = self._z_layer_count
+        
 
     def _init_properties(self):
         """init properties, extract useful metadata from TIFF tags"""
@@ -143,6 +242,10 @@ class TiffFileWrapper:
             str(first_page.dtype),
             'channels':
             str(first_page.shape[2] if len(first_page.shape) == 3 else 1),
+            'is_zstack':
+            str(self.is_zstack),
+            'z_layer_count':
+            str(self.z_layer_count),
         })
 
         # add useful TIFF tags
@@ -195,67 +298,220 @@ class TiffFileWrapper:
         if z_layer is None:
             z_layer = 0
 
+        # Validate and clamp coordinates to prevent out-of-bounds access
+        x, y = location
+        W0, H0 = self.dimensions
+        
+        # Coordinate overshoot protection: reject coordinates far beyond valid range
+        OVERSHOOT_LIMIT = 10.0
+        if x > W0 * OVERSHOOT_LIMIT or y > H0 * OVERSHOOT_LIMIT:
+            logger.error(f"[COORD] Location ({x:.0f}, {y:.0f}) far exceeds Level 0 bounds ({W0}, {H0}) by {x/W0:.1f}x, {y/H0:.1f}x")
+            logger.error(f"[COORD] This is likely a frontend coordinate bug. Returning black tile.")
+            # Return black tile with appropriate format based on as_array parameter
+            black_tile = np.zeros((size[1], size[0], 3), dtype=np.uint8)
+            if as_array:
+                return black_tile
+            else:
+                return Image.fromarray(black_tile)
+        
+        # Clamp to Level 0 bounds
+        x = max(0, min(x, W0 - size[0]))
+        y = max(0, min(y, H0 - size[1]))
+
         # calculate actual coordinates in current level
         scale_factor = self.dimensions[0] / self.level_dimensions[level][0]
-        x, y = location
         scaled_x = int(x / scale_factor)
         scaled_y = int(y / scale_factor)
 
+        # Initialize region variable to avoid UnboundLocalError in exception paths
+        region = None
+
         # read region from corresponding page
         # Check if this is a z-stack file using series
-        if hasattr(self._tiff, 'series') and len(self._tiff.series) > 0:
-            main_series = self._tiff.series[0]
+        if hasattr(self, '_main_series') and self._main_series is not None:
+            main_series = self._main_series  # Use the largest resolution series we selected
             if hasattr(main_series, 'shape') and len(main_series.shape) == 4:
-                # This is a z-stack file (z, height, width, channels)
+                # This is a z-stack file with Z dimension
+                # Use series.levels[L].aszarr() for proper Z-stack reading (CORRECT approach)
                 try:
-                    # Use series to read with z-layer
-                    # Get the series data with zarr-like access
-                    img_full = main_series.asarray()  # Shape: (z, height, width, channels)
+                    import zarr
                     
-                    # Ensure z_layer is within bounds
-                    z_count = img_full.shape[0]
-                    if z_layer >= z_count:
-                        z_layer = 0
+                    # Check if series has levels attribute
+                    if not hasattr(main_series, 'levels') or level >= len(main_series.levels):
+                        raise ValueError(f"Series does not have level {level} (has {len(main_series.levels) if hasattr(main_series, 'levels') else 0} levels)")
                     
-                    # Extract the specific z-layer
-                    img = img_full[z_layer]  # Shape: (height, width, channels)
+                    # Get the specific pyramid level
+                    level_series = main_series.levels[level]
                     
-                    # Apply downsampling if level > 0
-                    if level > 0:
-                        downsample_factor = 2 ** level
-                        from skimage.transform import downscale_local_mean
-                        # Downsample spatial dimensions only
-                        img = downscale_local_mean(img, (downsample_factor, downsample_factor, 1))
-                        img = img.astype(np.uint8)
+                    # IMPORTANT: Use level_series.axes, not main_series.axes!
+                    # Level 0 has axes='ZYXS', Level 1+ have axes='IYXS'
+                    axes = level_series.axes if hasattr(level_series, 'axes') else 'ZYXS'
+                    logger.debug(f"[Z-Stack] Level {level} series - shape: {level_series.shape if hasattr(level_series, 'shape') else 'unknown'}, axes: {axes}")
                     
-                    # Extract region
-                    region = img[scaled_y:scaled_y + size[1], scaled_x:scaled_x + size[0]]
+                    # Get zarr array from this level (this properly handles Z dimension)
+                    store = level_series.aszarr()
+                    z_obj = zarr.open(store, mode='r')
+                    logger.debug(f"[Z-Stack] Zarr object type: {type(z_obj)}, keys: {list(z_obj.keys()) if hasattr(z_obj, 'keys') else 'N/A'}")
                     
-                except MemoryError as e:
-                    # Memory error - don't fallback, raise clear error
-                    raise MemoryError(
-                        f"Insufficient memory to load z-stack file."
-                        f"File dimensions: {main_series.shape}, "
-                        f"requires approximately {np.prod(main_series.shape) / 1024**3:.1f} GB of memory."
-                        f"Please use a smaller file or increase system memory."
-                    ) from e
+                    # If it's a Group, we need to get the actual array
+                    if isinstance(z_obj, zarr.hierarchy.Group):
+                        # For NDPI z-stack Level 0, the Group contains ALL pyramid levels as keys: '0', '1', '2', etc.
+                        # We need to use the key that matches the current level
+                        key = str(level)
+                        if key in z_obj.keys():
+                            z_array = z_obj[key]
+                            logger.debug(f"[Z-Stack] Using group key '{key}' for level {level}, array shape: {z_array.shape}, dtype: {z_array.dtype}")
+                        else:
+                            # Fallback: try first key
+                            keys = list(z_obj.keys())
+                            if len(keys) > 0:
+                                key = keys[0]
+                                z_array = z_obj[key]
+                                logger.warning(f"[Z-Stack] Level {level} not in group keys {keys}, using first key '{key}'")
+                            else:
+                                raise ValueError(f"Zarr Group is empty, no arrays found")
+                        
+                        # Note: axes from group array should match level_series.axes (already set above)
+                        # Keep using the axes we got from level_series
+                        logger.debug(f"[Z-Stack] Group array selected, using axes: {axes}")
+                    else:
+                        # Directly got an Array (typical for Level 1+)
+                        z_array = z_obj
+                        logger.debug(f"[Z-Stack] Direct array - shape: {z_array.shape}, dtype: {z_array.dtype}, axes: {axes}")
+                    
+                    # Build slicer: select specific Z layer + region
+                    # Find Z/I, Y, X axes positions
+                    # Note: 'Z' is used for Level 0, 'I' (image index) is used for Level 1+ in NDPI z-stacks
+                    z_idx = None
+                    if 'Z' in axes:
+                        z_idx = axes.index('Z')
+                        logger.debug(f"[Z-Stack] Found 'Z' axis at index {z_idx}")
+                    elif 'I' in axes:
+                        # Only use 'I' as Z if it has multiple planes (length > 1)
+                        i_idx = axes.index('I')
+                        i_length = z_array.shape[i_idx]
+                        if i_length > 1:
+                            z_idx = i_idx
+                            logger.debug(f"[Z-Stack] Using 'I' axis (length={i_length}) as Z at index {z_idx}")
+                        else:
+                            logger.warning(f"[Z-Stack] 'I' axis found but length={i_length}, not using as Z")
+                    
+                    if z_idx is None:
+                        raise ValueError(f"No valid Z or I axis found in axes: {axes}, shape: {z_array.shape}")
+                    
+                    y_idx = axes.index('Y') if 'Y' in axes else None
+                    x_idx = axes.index('X') if 'X' in axes else None
+                    
+                    logger.debug(f"[Z-Stack] Axes indices: z={z_idx}, y={y_idx}, x={x_idx}")
+                    
+                    # Get the level dimensions for clamping
+                    level_dims = self.level_dimensions[level]  # (width, height)
+                    level_h, level_w = level_dims[1], level_dims[0]
+                    
+                    # Check if coordinates are completely out of bounds
+                    if scaled_x >= level_w or scaled_y >= level_h:
+                        logger.warning(f"[Z-Stack] Coordinates out of bounds: scaled=({scaled_x}, {scaled_y}), level_dims=({level_w}, {level_h})")
+                        # Return black tile immediately for out-of-bounds coordinates
+                        region = np.zeros((size[1], size[0], 3), dtype=np.uint8)
+                    else:
+                        # Clamp coordinates to valid range at this level
+                        # IMPORTANT: Ensure y_start < level_h and x_start < level_w
+                        y_start = max(0, min(scaled_y, level_h - 1))
+                        y_end = max(y_start + 1, min(scaled_y + size[1], level_h))  # Ensure at least 1px height
+                        x_start = max(0, min(scaled_x, level_w - 1))
+                        x_end = max(x_start + 1, min(scaled_x + size[0], level_w))  # Ensure at least 1px width
+                        
+                        # Build slicer for all dimensions
+                        slicer = [slice(None)] * len(axes)
+                        slicer[z_idx] = z_layer  # Select specific Z plane
+                        if y_idx is not None:
+                            slicer[y_idx] = slice(y_start, y_end)
+                        if x_idx is not None:
+                            slicer[x_idx] = slice(x_start, x_end)
+                        
+                        region = np.asarray(z_array[tuple(slicer)])
+                    
+                    # Ensure region is 3D (H, W, C) - only if region was successfully read
+                    if region is not None:
+                        if region.ndim == 2:
+                            region = region[:, :, np.newaxis]
+                        elif region.ndim > 3:
+                            # Squeeze extra dimensions but keep H, W, C
+                            while region.ndim > 3 and region.shape[0] == 1:
+                                region = region[0]
+                            if region.ndim == 2:
+                                region = region[:, :, np.newaxis]
+                    
                 except Exception as e:
-                    # Other errors - also raise clear error for z-stack
-                    raise RuntimeError(
-                        f"Error reading layer {z_layer} of z-stack: {str(e)}"
-                    ) from e
+                    logger.error(f"[Z-Stack] Failed to read z_layer={z_layer}, level={level}: {e}")
+                    logger.exception(e)
+                    region = np.zeros((size[1], size[0], 3), dtype=np.uint8)
             else:
-                # Not a z-stack, use page-based reading
-                img = self._tiff.pages[level].asarray()
-                region = img[scaled_y:scaled_y + size[1], scaled_x:scaled_x + size[0]]
+                # Not a z-stack, use zarr if available
+                page = self._tiff.pages[level]
+                if page.is_tiled:
+                    try:
+                        if level not in self._zarr_arrays:
+                            import zarr
+                            store = page.aszarr()
+                            self._zarr_arrays[level] = zarr.open(store, mode='r')
+                        
+                        z_array = self._zarr_arrays[level]
+                        region = np.asarray(z_array[scaled_y:scaled_y + size[1], scaled_x:scaled_x + size[0], :])
+                    except Exception:
+                        img = page.asarray()
+                        region = img[scaled_y:scaled_y + size[1], scaled_x:scaled_x + size[0]]
+                else:
+                    img = page.asarray()
+                    region = img[scaled_y:scaled_y + size[1], scaled_x:scaled_x + size[0]]
         else:
             # Fallback to page-based reading
-            img = self._tiff.pages[level].asarray()
-            region = img[scaled_y:scaled_y + size[1], scaled_x:scaled_x + size[0]]
+            page = self._tiff.pages[level]
+            if page.is_tiled:
+                try:
+                    if level not in self._zarr_arrays:
+                        import zarr
+                        store = page.aszarr()
+                        self._zarr_arrays[level] = zarr.open(store, mode='r')
+                    
+                    z_array = self._zarr_arrays[level]
+                    region = np.asarray(z_array[scaled_y:scaled_y + size[1], scaled_x:scaled_x + size[0], :])
+                except Exception:
+                    img = page.asarray()
+                    region = img[scaled_y:scaled_y + size[1], scaled_x:scaled_x + size[0]]
+            else:
+                img = page.asarray()
+                region = img[scaled_y:scaled_y + size[1], scaled_x:scaled_x + size[0]]
+
+        # Final safety check: ensure region was successfully read
+        if region is None:
+            logger.error(f"[read_region] region is None after all attempts, returning black tile")
+            region = np.zeros((size[1], size[0], 3), dtype=np.uint8)
 
         if as_array:
             return region
         return Image.fromarray(region)
+    
+    def diagnose_zstack_structure(self):
+        """Diagnostic function to understand z-stack file structure"""
+        if not self._is_zstack:
+            logger.info("[Z-Stack Diagnosis] Not a z-stack file")
+            return
+        
+        logger.info(f"[Z-Stack Diagnosis] ==================== NDPI Z-Stack Structure ====================")
+        logger.info(f"[Z-Stack Diagnosis] Z layers: {self._z_layer_count}, Pyramid levels: {self.level_count}")
+        logger.info(f"[Z-Stack Diagnosis] Total pages in file: {len(self._tiff.pages)}")
+        logger.info(f"[Z-Stack Diagnosis] Expected pages (z_layers * levels): {self._z_layer_count * self.level_count}")
+        
+        # Sample first few pages to understand structure
+        logger.info(f"[Z-Stack Diagnosis] Sampling first 10 pages:")
+        for idx in range(min(10, len(self._tiff.pages))):
+            try:
+                page = self._tiff.pages[idx]
+                logger.info(f"[Z-Stack Diagnosis]   Page {idx}: shape={page.shape}, is_tiled={page.is_tiled}")
+            except Exception as e:
+                logger.warning(f"[Z-Stack Diagnosis]   Page {idx}: ERROR - {e}")
+        logger.info(f"[Z-Stack Diagnosis] ================================================================")
 
 
 class SimpleImageWrapper:
@@ -406,7 +662,6 @@ class NiftiImageWrapper:
         # Calculate global min and max values for the entire dataset
         self._global_min = self._data.min()
         self._global_max = self._data.max()
-        print(f"NiftiImageWrapper: Global min={self._global_min}, Global max={self._global_max}")
         
         self._init_levels()
         self._init_properties()
@@ -433,10 +688,8 @@ class NiftiImageWrapper:
             if len(shape) >= 3:
                 z_mid = shape[2] // 2
                 original_height, original_width = shape[0], shape[1]
-                print(f"NiftiImageWrapper: 3D data, using middle slice z={z_mid}, shape={original_height}x{original_width}")
             else:
                 original_height, original_width = shape
-                print(f"NiftiImageWrapper: 2D data, shape={original_height}x{original_width}")
             
             self.dimensions = (original_width, original_height)
 
@@ -453,13 +706,11 @@ class NiftiImageWrapper:
                 factor *= 2
 
             self.level_count = len(self.level_dimensions)
-            print(f"NiftiImageWrapper: Created {self.level_count} pyramid levels")
         else:
             # Fallback for unusual shapes
             self.dimensions = (100, 100)
             self.level_dimensions = [(100, 100)]
             self.level_count = 1
-            print(f"NiftiImageWrapper: Abnormal data shape, using default size 100x100")
 
     def _init_properties(self):
         """Initialize image properties"""
