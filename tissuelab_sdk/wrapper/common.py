@@ -104,8 +104,14 @@ class TiffFileWrapper:
         self._is_zstack = False
         self._z_layer_count = 1
         
+        # Check if file extension is .ndpi (only .ndpi files support ZStacking)
+        import os
+        file_ext = os.path.splitext(self.path.lower())[1]
+        is_ndpi = file_ext == '.ndpi'
+        
         # Try using series if available (better for z-stack and complex TIFF files)
-        if hasattr(self._tiff, 'series') and len(self._tiff.series) > 0:
+        # Only process ZStacking for .ndpi files
+        if is_ndpi and hasattr(self._tiff, 'series') and len(self._tiff.series) > 0:
             # Select the series with largest resolution (most important for NDPI)
             main_series = self._pick_largest_series()
             if main_series is None:
@@ -326,9 +332,14 @@ class TiffFileWrapper:
         # Initialize region variable to avoid UnboundLocalError in exception paths
         region = None
 
+        # Check if file extension is .ndpi (only .ndpi files support ZStacking)
+        import os
+        file_ext = os.path.splitext(self.path.lower())[1]
+        is_ndpi = file_ext == '.ndpi'
+
         # read region from corresponding page
-        # Check if this is a z-stack file using series
-        if hasattr(self, '_main_series') and self._main_series is not None:
+        # Check if this is a z-stack file using series (only for .ndpi files)
+        if is_ndpi and hasattr(self, '_main_series') and self._main_series is not None:
             main_series = self._main_series  # Use the largest resolution series we selected
             if hasattr(main_series, 'shape') and len(main_series.shape) == 4:
                 # This is a z-stack file with Z dimension
