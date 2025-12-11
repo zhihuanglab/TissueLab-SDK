@@ -274,11 +274,86 @@ class TiffFileWrapper:
                 self.fit_page = i
             self.properties[f'level_{i}_dimensions'] = f'{dims[0]}x{dims[1]}'
 
+        # Extract MPP (microns per pixel) from TIFF resolution tags
+        # This provides compatibility with code that expects 'tiffslide.mpp-x'
+        try:
+            xres_tag = tags.get('XResolution')
+            yres_tag = tags.get('YResolution')
+            unit_tag = tags.get('ResolutionUnit')
+            
+            if xres_tag is not None:
+                xres = xres_tag.value
+                # XResolution is typically a tuple/fraction (numerator, denominator)
+                if isinstance(xres, tuple) and len(xres) == 2:
+                    pixels_per_unit = xres[0] / xres[1] if xres[1] != 0 else xres[0]
+                else:
+                    pixels_per_unit = float(xres)
+                
+                # Convert to microns based on ResolutionUnit
+                # RESUNIT: 1=None, 2=inch, 3=centimeter
+                unit_val = unit_tag.value if unit_tag else 1
+                # Handle enum types
+                if hasattr(unit_val, 'value'):
+                    unit_val = unit_val.value
+                elif hasattr(unit_val, 'name'):
+                    unit_val = 3 if 'CENTIMETER' in str(unit_val).upper() else (2 if 'INCH' in str(unit_val).upper() else 1)
+                
+                mpp = None
+                if unit_val == 3:  # centimeters
+                    mpp = 10000.0 / pixels_per_unit  # cm to microns
+                elif unit_val == 2:  # inches
+                    mpp = 25400.0 / pixels_per_unit  # inches to microns
+                
+                # Only set if it's a reasonable value for microscopy (0.05 - 10.0 µm/px)
+                # Covers 100x oil immersion (~0.1) down to 2x objective (~5.0)
+                if mpp is not None and 0.05 < mpp < 10.0:
+                    self.properties['tiffslide.mpp-x'] = mpp
+                    self.properties['tiffslide.mpp-y'] = mpp  # Assume square pixels
+                    
+                    # Also compute YResolution if available
+                    if yres_tag is not None:
+                        yres = yres_tag.value
+                        if isinstance(yres, tuple) and len(yres) == 2:
+                            pixels_per_unit_y = yres[0] / yres[1] if yres[1] != 0 else yres[0]
+                        else:
+                            pixels_per_unit_y = float(yres)
+                        
+                        if unit_val == 3:
+                            mpp_y = 10000.0 / pixels_per_unit_y
+                        elif unit_val == 2:
+                            mpp_y = 25400.0 / pixels_per_unit_y
+                        else:
+                            mpp_y = mpp
+                            
+                        if 0.05 < mpp_y < 10.0:
+                            self.properties['tiffslide.mpp-y'] = mpp_y
+        except Exception as e:
+            # MPP extraction failed, properties won't have tiffslide.mpp-x
+            logger.debug(f"Could not extract MPP from TIFF tags: {e}")
+
     def get_thumbnail(self, size):
         """return thumbnail, use the smallest page"""
         img = self._tiff.pages[-1].asarray()  # use the smallest page
         pil_img = Image.fromarray(img)
         return pil_img.thumbnail(size, Image.Resampling.LANCZOS)
+
+    def get_best_level_for_downsample(self, downsample: float) -> int:
+        """Find the best pyramid level for a given downsample factor.
+        
+        Returns the level with the largest downsample <= the requested value,
+        matching OpenSlide/TiffSlide behavior.
+        
+        Args:
+            downsample: The desired downsample factor (e.g., 4.0 means 4x smaller)
+            
+        Returns:
+            The index of the best level to use
+        """
+        best_level = 0
+        for i, ds in enumerate(self.level_downsamples):
+            if ds <= downsample:
+                best_level = i
+        return best_level
 
     def read_region(self, location, level, size, as_array=False, z_layer=None):
         """read region from specified level
