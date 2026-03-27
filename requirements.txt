@@ -1,4 +1,4 @@
-pillow>=11.0.0
+pillow>=12.0.0
 tifffile>=2026.3.3
 tiffslide==3.0.0
 pydicom>=3.0.2
