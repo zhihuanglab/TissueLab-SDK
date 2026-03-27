@@ -6,13 +6,13 @@ package. Import via: `from tissuelab_sdk.wrapper import ...`.
 
 from .common import *  # noqa: F401,F403
 
-# On Windows, expose the extra CZI and ISyntax wrappers
+# On Windows, expose the extra CZI wrapper (requires pylibCZIrw/pythoncom)
 import sys
 
 def _is_windows() -> bool:
     return sys.platform.startswith('win')
 
 if _is_windows():
-    from .windows import CziImageWrapper, ISyntaxImageWrapper  # noqa: F401
+    from .windows import CziImageWrapper  # noqa: F401
 
 

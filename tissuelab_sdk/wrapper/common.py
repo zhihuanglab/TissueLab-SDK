@@ -335,7 +335,8 @@ class TiffFileWrapper:
         """return thumbnail, use the smallest page"""
         img = self._tiff.pages[-1].asarray()  # use the smallest page
         pil_img = Image.fromarray(img)
-        return pil_img.thumbnail(size, Image.Resampling.LANCZOS)
+        pil_img.thumbnail(size, Image.Resampling.LANCZOS)
+        return pil_img
 
     def get_best_level_for_downsample(self, downsample: float) -> int:
         """Find the best pyramid level for a given downsample factor.
@@ -852,3 +853,72 @@ class NiftiImageWrapper:
         if as_array:
             return np.array(img)
         return img
+
+
+from isyntax import ISyntax as _ISyntax
+
+
+class ISyntaxImageWrapper:
+    """Wrapper for ISyntax image files using WSI interface (cross-platform)"""
+
+    def __init__(self, isyntax_path):
+        self.path = isyntax_path
+        self.isyntax_reader = None
+        try:
+            self.isyntax_reader = _ISyntax.open(self.path)
+            self._init_levels()
+        except Exception as e:
+            print(f"Error opening ISyntax file {isyntax_path}: {e}")
+            self.dimensions = (100, 100)
+            self.level_count = 1
+            self.level_dimensions = [(100, 100)]
+            self.properties = {
+                'vendor': 'ISyntaxImageWrapper',
+                'dimensions': '100x100',
+                'level_count': '1',
+                'error': str(e)
+            }
+            raise
+
+    def close(self):
+        """Explicitly close the ISyntax reader."""
+        if hasattr(self, 'isyntax_reader') and self.isyntax_reader is not None:
+            try:
+                self.isyntax_reader.close()
+            except Exception as e:
+                print(f"Error closing ISyntax reader: {e}")
+            finally:
+                self.isyntax_reader = None
+
+    def __del__(self):
+        try:
+            if hasattr(self, 'isyntax_reader') and self.isyntax_reader is not None:
+                self.close()
+        except Exception:
+            pass
+
+    def _init_levels(self):
+        if self.isyntax_reader is None:
+            raise RuntimeError("ISyntax reader not initialized")
+        self.dimensions = self.isyntax_reader.dimensions
+        self.level_count = self.isyntax_reader.level_count
+        self.level_dimensions = self.isyntax_reader.level_dimensions
+        self.properties = {
+            'vendor': 'ISyntaxImageWrapper',
+            'dimensions': f'{self.dimensions[0]}x{self.dimensions[1]}',
+            'level_count': str(self.level_count),
+        }
+
+    def read_region(self, location, level, size, as_array=False):
+        """Read a region from the image at the specified level, array type: RGBA"""
+        if self.isyntax_reader is None:
+            raise RuntimeError("ISyntax reader not initialized")
+        scale_factor = self.dimensions[0] / self.level_dimensions[level][0]
+        x, y = location
+        scaled_x = int(x / scale_factor)
+        scaled_y = int(y / scale_factor)
+        scaled_w = int(size[0] / scale_factor)
+        scaled_h = int(size[1] / scale_factor)
+        img_array = self.isyntax_reader.read_region(
+            scaled_x, scaled_y, scaled_w, scaled_h, level)
+        return img_array if as_array else Image.fromarray(img_array, mode='RGBA')
