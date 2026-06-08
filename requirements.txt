@@ -1,10 +1,9 @@
-pillow~=11.0.0
-tifffile>=2023.0.0
-tiffslide
-pydicom>=2.3.0
-numpy==1.26.4
-nibabel>=5.2.0
-czifile>=2019.7.2; platform_system == "Windows"
-pylibCZIrw>=3.3.0; platform_system == "Windows"
+pillow>=12.2.0
+tiffslide>=3.0.0
+pydicom>=3.0.2
+numpy>=2
+nibabel>=5.4.2
+czifile>=2019.7.2.3; platform_system == "Windows"
+pylibCZIrw>=6.0.1; platform_system == "Windows"
 pywin32; platform_system == "Windows"
 
