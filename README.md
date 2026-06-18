@@ -45,7 +45,7 @@ with DicomImageWrapper("path/to/image.dcm") as dicom:
 - **DICOM**: Medical imaging standard
 - **NIfTI**: Neuroimaging format
 - **CZI**: Zeiss microscopy format (Windows)
-- **ISyntax**: Philips pathology format (Windows)
+- **ISyntax**: Philips pathology format
 - **Simple Images**: JPEG, PNG, BMP, etc.
 
 ## 🔧 API Reference
@@ -59,7 +59,7 @@ from tissuelab_sdk.wrapper import (
     NiftiImageWrapper,   # NIfTI files
     SimpleImageWrapper,  # JPEG, PNG, etc.
     CziImageWrapper,     # CZI files (Windows)
-    ISyntaxImageWrapper  # ISyntax files (Windows)
+    ISyntaxImageWrapper  # iSyntax files
 )
 
 # All wrappers share the same interface

@@ -3,6 +3,7 @@ tiffslide>=3.0.0
 pydicom>=3.0.2
 numpy>=2
 nibabel>=5.4.2
+fastslide>=0.7.4
 czifile>=2019.7.2.3; platform_system == "Windows"
 pylibCZIrw>=6.0.1; platform_system == "Windows"
 pywin32; platform_system == "Windows"

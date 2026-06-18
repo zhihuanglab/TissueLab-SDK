@@ -852,3 +852,6 @@ class NiftiImageWrapper:
         if as_array:
             return np.array(img)
         return img
+
+
+from .isyntax import ISyntaxImageWrapper  # noqa: F401
