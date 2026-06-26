@@ -3,10 +3,8 @@ import tiffslide
 from PIL import Image
 import pydicom
 import numpy as np
-import sys
 import threading
 import nibabel as nib
-import io
 import logging
 
 # Create logger for wrappers
