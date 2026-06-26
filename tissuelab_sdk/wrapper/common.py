@@ -427,7 +427,7 @@ class TiffFileWrapper:
                     logger.debug(f"[Z-Stack] Zarr object type: {type(z_obj)}, keys: {list(z_obj.keys()) if hasattr(z_obj, 'keys') else 'N/A'}")
                     
                     # If it's a Group, we need to get the actual array
-                    if isinstance(z_obj, zarr.hierarchy.Group):
+                    if isinstance(z_obj, zarr.Group):
                         # For NDPI z-stack Level 0, the Group contains ALL pyramid levels as keys: '0', '1', '2', etc.
                         # We need to use the key that matches the current level
                         key = str(level)
