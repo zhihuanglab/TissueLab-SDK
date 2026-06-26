@@ -3,10 +3,8 @@ import tiffslide
 from PIL import Image
 import pydicom
 import numpy as np
-import sys
 import threading
 import nibabel as nib
-import io
 import logging
 
 # Create logger for wrappers
@@ -852,3 +850,6 @@ class NiftiImageWrapper:
         if as_array:
             return np.array(img)
         return img
+
+
+from .isyntax import ISyntaxImageWrapper  # noqa: F401
